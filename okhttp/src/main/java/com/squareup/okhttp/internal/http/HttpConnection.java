@@ -16,22 +16,18 @@
 
 package com.squareup.okhttp.internal.http;
 
-import com.squareup.okhttp.Connection;
-import com.squareup.okhttp.ConnectionPool;
 import com.squareup.okhttp.Headers;
 import com.squareup.okhttp.Response;
+import com.squareup.okhttp.StreamAllocation;
 import com.squareup.okhttp.internal.Internal;
 import com.squareup.okhttp.internal.Util;
 import java.io.EOFException;
 import java.io.IOException;
 import java.net.ProtocolException;
-import java.net.Socket;
-import java.net.SocketTimeoutException;
 import okio.Buffer;
 import okio.BufferedSink;
 import okio.BufferedSource;
 import okio.ForwardingTimeout;
-import okio.Okio;
 import okio.Sink;
 import okio.Source;
 import okio.Timeout;
@@ -42,23 +38,21 @@ import static com.squareup.okhttp.internal.http.Transport.DISCARD_STREAM_TIMEOUT
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 /**
- * A socket connection that can be used to send HTTP/1.1 messages. This class
+ * A stream that can send a single HTTP/1.1 request and read a single HTTP response. This class
  * strictly enforces the following lifecycle:
  * <ol>
  *   <li>{@link #writeRequest Send request headers}.
- *   <li>Open a sink to write the request body. Either {@link
- *       #newFixedLengthSink fixed-length} or {@link #newChunkedSink chunked}.
+ *   <li>Open a sink to write the request body. Either {@link #newFixedLengthSink fixed-length} or
+ *       {@link #newChunkedSink chunked}.
  *   <li>Write to and then close that sink.
  *   <li>{@link #readResponse Read response headers}.
- *   <li>Open a source to read the response body. Either {@link
- *       #newFixedLengthSource fixed-length}, {@link #newChunkedSource chunked}
- *       or {@link #newUnknownLengthSource unknown length}.
+ *   <li>Open a source to read the response body. Either {@link #newFixedLengthSource fixed-length},
+ *       {@link #newChunkedSource chunked} or {@link #newUnknownLengthSource unknown length}.
  *   <li>Read from and close that source.
  * </ol>
- * <p>Exchanges that do not have a request body may skip creating and closing
- * the request body. Exchanges that do not have a response body can call {@link
- * #newFixedLengthSource(long) newFixedLengthSource(0)} and may skip reading and
- * closing that source.
+ * <p>Exchanges that do not have a request body may skip creating and closing the request body.
+ * Exchanges that do not have a response body can call {@link #newFixedLengthSource(long)
+ * newFixedLengthSource(0)} and may skip reading and closing that source.
  */
 public final class HttpConnection {
   private static final int STATE_IDLE = 0; // Idle connections are ready to write request headers.
@@ -69,26 +63,17 @@ public final class HttpConnection {
   private static final int STATE_READING_RESPONSE_BODY = 5;
   private static final int STATE_CLOSED = 6;
 
-  private static final int ON_IDLE_HOLD = 0;
-  private static final int ON_IDLE_POOL = 1;
-  private static final int ON_IDLE_CLOSE = 2;
-
-  private final ConnectionPool pool;
-  private final Connection connection;
-  private final Socket socket;
+  private final StreamAllocation allocation;
   private final BufferedSource source;
   private final BufferedSink sink;
 
   private int state = STATE_IDLE;
-  private int onIdle = ON_IDLE_HOLD;
 
-  public HttpConnection(ConnectionPool pool, Connection connection, Socket socket)
-      throws IOException {
-    this.pool = pool;
-    this.connection = connection;
-    this.socket = socket;
-    this.source = Okio.buffer(Okio.source(socket));
-    this.sink = Okio.buffer(Okio.sink(socket));
+  public HttpConnection(StreamAllocation allocation, BufferedSource source,
+      BufferedSink sink) throws IOException {
+    this.allocation = allocation;
+    this.source = source;
+    this.sink = sink;
   }
 
   public void setTimeouts(int readTimeoutMillis, int writeTimeoutMillis) {
@@ -104,66 +89,41 @@ public final class HttpConnection {
    * Configure this connection to put itself back into the connection pool when
    * the HTTP response body is exhausted.
    */
-  public void poolOnIdle() {
-    onIdle = ON_IDLE_POOL;
-
-    // If we're already idle, go to the pool immediately.
-    if (state == STATE_IDLE) {
-      onIdle = ON_IDLE_HOLD; // Set the on idle policy back to the default.
-      Internal.instance.recycle(pool, connection);
-    }
+  private void poolOnIdle() {
+    //onIdle = ON_IDLE_POOL;
+    //
+    //// If we're already idle, go to the pool immediately.
+    //if (state == STATE_IDLE) {
+    //  onIdle = ON_IDLE_HOLD; // Set the on idle policy back to the default.
+    //  Internal.instance.recycle(pool, connection);
+    //}
   }
 
   /**
    * Configure this connection to close itself when the HTTP response body is
    * exhausted.
    */
-  public void closeOnIdle() throws IOException {
-    onIdle = ON_IDLE_CLOSE;
-
-    // If we're already idle, close immediately.
-    if (state == STATE_IDLE) {
-      state = STATE_CLOSED;
-      connection.getSocket().close();
-    }
+  private void closeOnIdle() throws IOException {
+    //onIdle = ON_IDLE_CLOSE;
+    //
+    //// If we're already idle, close immediately.
+    //if (state == STATE_IDLE) {
+    //  state = STATE_CLOSED;
+    //  connection.getSocket().close();
+    //}
   }
 
   /** Returns true if this connection is closed. */
-  public boolean isClosed() {
+  private boolean isClosed() {
     return state == STATE_CLOSED;
   }
 
-  public void closeIfOwnedBy(Object owner) throws IOException {
-    Internal.instance.closeIfOwnedBy(connection, owner);
+  private void closeIfOwnedBy(Object owner) throws IOException {
+    //Internal.instance.closeIfOwnedBy(connection, owner);
   }
 
   public void flush() throws IOException {
     sink.flush();
-  }
-
-  /** Returns the number of buffered bytes immediately readable. */
-  public long bufferSize() {
-    return source.buffer().size();
-  }
-
-  /** Test for a stale socket. */
-  public boolean isReadable() {
-    try {
-      int readTimeout = socket.getSoTimeout();
-      try {
-        socket.setSoTimeout(1);
-        if (source.exhausted()) {
-          return false; // Stream is exhausted; socket is closed.
-        }
-        return true;
-      } finally {
-        socket.setSoTimeout(readTimeout);
-      }
-    } catch (SocketTimeoutException ignored) {
-      return true; // Read timed out; socket is good.
-    } catch (IOException e) {
-      return false; // Couldn't read; socket is closed.
-    }
   }
 
   /** Returns bytes of a request header for sending on an HTTP transport. */
@@ -207,8 +167,7 @@ public final class HttpConnection {
       }
     } catch (EOFException e) {
       // Provide more context if the server ends the stream before sending a response.
-      IOException exception = new IOException("unexpected end of stream on " + connection
-          + " (recycle count=" + Internal.instance.recycleCount(connection) + ")");
+      IOException exception = new IOException("unexpected end of stream on " + allocation + ")");
       exception.initCause(e);
       throw exception;
     }
@@ -254,16 +213,9 @@ public final class HttpConnection {
 
   public Source newUnknownLengthSource() throws IOException {
     if (state != STATE_OPEN_RESPONSE_BODY) throw new IllegalStateException("state: " + state);
+    allocation.noNewStreams();
     state = STATE_READING_RESPONSE_BODY;
     return new UnknownLengthSource();
-  }
-
-  public BufferedSink rawSink() {
-    return sink;
-  }
-
-  public BufferedSource rawSource() {
-    return source;
   }
 
   /**
@@ -363,22 +315,15 @@ public final class HttpConnection {
     }
 
     /**
-     * Closes the cache entry and makes the socket available for reuse. This
-     * should be invoked when the end of the body has been reached.
+     * Closes the cache entry and makes the connection available for reuse. This should be invoked
+     * when the end of the body has been reached.
      */
-    protected final void endOfInput(boolean recyclable) throws IOException {
+    protected final void endOfInput() throws IOException {
       if (state != STATE_READING_RESPONSE_BODY) throw new IllegalStateException("state: " + state);
 
       detachTimeout(timeout);
-
-      state = STATE_IDLE;
-      if (recyclable && onIdle == ON_IDLE_POOL) {
-        onIdle = ON_IDLE_HOLD; // Set the on idle policy back to the default.
-        Internal.instance.recycle(pool, connection);
-      } else if (onIdle == ON_IDLE_CLOSE) {
-        state = STATE_CLOSED;
-        connection.getSocket().close();
-      }
+      allocation.streamComplete(this);
+      state = STATE_CLOSED;
     }
 
     /**
@@ -394,7 +339,8 @@ public final class HttpConnection {
      * to cancel the transfer, closing the connection is the only solution.
      */
     protected final void unexpectedEndOfInput() {
-      Util.closeQuietly(connection.getSocket());
+      allocation.noNewStreams();
+      allocation.streamComplete(this);
       state = STATE_CLOSED;
     }
   }
@@ -406,7 +352,7 @@ public final class HttpConnection {
     public FixedLengthSource(long length) throws IOException {
       bytesRemaining = length;
       if (bytesRemaining == 0) {
-        endOfInput(true);
+        endOfInput();
       }
     }
 
@@ -423,7 +369,7 @@ public final class HttpConnection {
 
       bytesRemaining -= read;
       if (bytesRemaining == 0) {
-        endOfInput(true);
+        endOfInput();
       }
       return read;
     }
@@ -490,7 +436,7 @@ public final class HttpConnection {
         Headers.Builder trailersBuilder = new Headers.Builder();
         readHeaders(trailersBuilder);
         httpEngine.receiveHeaders(trailersBuilder.build());
-        endOfInput(true);
+        endOfInput();
       }
     }
 
@@ -516,7 +462,7 @@ public final class HttpConnection {
       long read = source.read(sink, byteCount);
       if (read == -1) {
         inputExhausted = true;
-        endOfInput(false);
+        endOfInput();
         return -1;
       }
       return read;

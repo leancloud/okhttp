@@ -35,6 +35,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import okio.Buffer;
+import okio.BufferedSink;
 import okio.BufferedSource;
 import okio.ByteString;
 import okio.Okio;
@@ -123,6 +124,8 @@ public final class FramedConnection implements Closeable {
   private boolean receivedInitialPeerSettings = false;
   final Variant variant;
   final Socket socket;
+  final BufferedSource socketSource;
+  final BufferedSink socketSink;
   final FrameWriter frameWriter;
 
   // Visible for testing
@@ -168,7 +171,9 @@ public final class FramedConnection implements Closeable {
     }
     bytesLeftInWriteWindow = peerSettings.getInitialWindowSize(DEFAULT_INITIAL_WINDOW_SIZE);
     socket = builder.socket;
-    frameWriter = variant.newWriter(Okio.buffer(Okio.sink(builder.socket)), client);
+    socketSource = builder.socketSource;
+    socketSink = builder.socketSink;
+    frameWriter = variant.newWriter(socketSink, client);
 
     readerRunnable = new Reader();
     new Thread(readerRunnable).start(); // Not a daemon thread.
@@ -518,23 +523,38 @@ public final class FramedConnection implements Closeable {
   public static class Builder {
     private String hostName;
     private Socket socket;
+    private BufferedSource socketSource;
+    private BufferedSink socketSink;
     private IncomingStreamHandler handler = IncomingStreamHandler.REFUSE_INCOMING_STREAMS;
     private Protocol protocol = Protocol.SPDY_3;
     private PushObserver pushObserver = PushObserver.CANCEL;
     private boolean client;
 
-    public Builder(boolean client, Socket socket) throws IOException {
-      this(((InetSocketAddress) socket.getRemoteSocketAddress()).getHostName(), client, socket);
+    public Builder(boolean client) throws IOException {
+      this.client = client;
     }
 
     /**
      * @param client true if this peer initiated the connection; false if this
      *     peer accepted the connection.
      */
-    public Builder(String hostName, boolean client, Socket socket) throws IOException {
+    public Builder(String hostName, boolean client) throws IOException {
       this.hostName = hostName;
       this.client = client;
+    }
+
+    public Builder socket(Socket socket) throws IOException {
+      return socket(socket, Okio.buffer(Okio.source(socket)), Okio.buffer(Okio.sink(socket)));
+    }
+
+    public Builder socket(Socket socket, BufferedSource socketSource, BufferedSink socketSink) {
+      if (hostName == null) {
+        hostName = ((InetSocketAddress) socket.getRemoteSocketAddress()).getHostName();
+      }
       this.socket = socket;
+      this.socketSource = socketSource;
+      this.socketSink = socketSink;
+      return this;
     }
 
     public Builder handler(IncomingStreamHandler handler) {
@@ -572,7 +592,7 @@ public final class FramedConnection implements Closeable {
       ErrorCode connectionErrorCode = ErrorCode.INTERNAL_ERROR;
       ErrorCode streamErrorCode = ErrorCode.INTERNAL_ERROR;
       try {
-        frameReader = variant.newReader(Okio.buffer(Okio.source(socket)), client);
+        frameReader = variant.newReader(socketSource, client);
         if (!client) {
           frameReader.readConnectionPreface();
         }

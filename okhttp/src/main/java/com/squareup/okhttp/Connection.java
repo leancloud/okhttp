@@ -1,39 +1,39 @@
 /*
- *  Licensed to the Apache Software Foundation (ASF) under one or more
- *  contributor license agreements.  See the NOTICE file distributed with
- *  this work for additional information regarding copyright ownership.
- *  The ASF licenses this file to You under the Apache License, Version 2.0
- *  (the "License"); you may not use this file except in compliance with
- *  the License.  You may obtain a copy of the License at
+ * Copyright (C) 2015 Square, Inc.
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package com.squareup.okhttp;
 
 import com.squareup.okhttp.internal.ConnectionSpecSelector;
+import com.squareup.okhttp.internal.Internal;
 import com.squareup.okhttp.internal.Platform;
 import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.internal.Version;
 import com.squareup.okhttp.internal.framed.FramedConnection;
-import com.squareup.okhttp.internal.http.FramedTransport;
 import com.squareup.okhttp.internal.http.HttpConnection;
-import com.squareup.okhttp.internal.http.HttpEngine;
-import com.squareup.okhttp.internal.http.HttpTransport;
 import com.squareup.okhttp.internal.http.OkHeaders;
 import com.squareup.okhttp.internal.http.RouteException;
-import com.squareup.okhttp.internal.http.Transport;
 import com.squareup.okhttp.internal.tls.OkHostnameVerifier;
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.net.Proxy;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.UnknownServiceException;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLPeerUnverifiedException;
@@ -41,6 +41,7 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import okio.BufferedSink;
 import okio.BufferedSource;
+import okio.Okio;
 import okio.Source;
 
 import static com.squareup.okhttp.internal.Util.closeQuietly;
@@ -48,105 +49,72 @@ import static java.net.HttpURLConnection.HTTP_OK;
 import static java.net.HttpURLConnection.HTTP_PROXY_AUTH;
 
 /**
- * The sockets and streams of an HTTP, HTTPS, or HTTPS+SPDY connection. May be
- * used for multiple HTTP request/response exchanges. Connections may be direct
- * to the origin server or via a proxy.
+ * The sockets and streams of an HTTP, HTTPS, or HTTPS+SPDY connection. May be used for multiple
+ * HTTP request/response exchanges. Connections may be direct to the origin server or via a proxy.
  *
- * <p>Typically instances of this class are created, connected and exercised
- * automatically by the HTTP client. Applications may use this class to monitor
- * HTTP connections as members of a {@linkplain ConnectionPool connection pool}.
+ * <p>Typically instances of this class are created, connected and exercised automatically by the
+ * HTTP client. Applications may use this class to monitor HTTP connections as members of a
+ * {@linkplain ConnectionPool connection pool}.
  *
- * <p>Do not confuse this class with the misnamed {@code HttpURLConnection},
- * which isn't so much a connection as a single request/response exchange.
+ * <p>Do not confuse this class with the misnamed {@code HttpURLConnection}, which isn't so much a
+ * connection as a single request/response exchange.
  *
  * <h3>Modern TLS</h3>
- * There are tradeoffs when selecting which options to include when negotiating
- * a secure connection to a remote host. Newer TLS options are quite useful:
+ * There are tradeoffs when selecting which options to include when negotiating a secure connection
+ * to a remote host. Newer TLS options are quite useful:
  * <ul>
- *   <li>Server Name Indication (SNI) enables one IP address to negotiate secure
- *       connections for multiple domain names.
- *   <li>Application Layer Protocol Negotiation (ALPN) enables the HTTPS port
- *       (443) to be used for different HTTP and SPDY protocols.
+ *     <li>Server Name Indication (SNI) enables one IP address to negotiate secure connections for
+ *         multiple domain names.
+ *     <li>Application Layer Protocol Negotiation (ALPN) enables the HTTPS port (443) to be used for
+ *         different HTTP and SPDY protocols.
  * </ul>
- * Unfortunately, older HTTPS servers refuse to connect when such options are
- * presented. Rather than avoiding these options entirely, this class allows a
- * connection to be attempted with modern options and then retried without them
- * should the attempt fail.
+ *
+ * <p>Unfortunately, older HTTPS servers refuse to connect when such options are presented. Rather
+ * than avoiding these options entirely, this class allows a connection to be attempted with modern
+ * options and then retried without them should the attempt fail.
+ *
+ * <h3>Connection Sharing</h3>
+ * Each connection can carry a varying number streams, depending on the underlying protocol being
+ * used. HTTP/1.x connections can carry either zero or one streams. HTTP/2 connections can carry any
+ * number of streams, dynamically configured with {@code SETTINGS_MAX_CONCURRENT_STREAMS}. A
+ * connection currently carrying zero streams is an idle stream. We keep it alive because reusing an
+ * existing connection is typically faster than establishing a new one.
+ *
+ * <p>When a single logical call requires multiple streams due to redirects or authorization
+ * challenges, we prefer to use the same physical connection for all streams in the sequence. There
+ * are potential performance and behavior consequences to this preference. To support this feature,
+ * this class separates <i>allocations</i> from <i>streams</i>. An allocation is created by a call,
+ * used for one or more streams, and then released. An allocated connection won't be stolen by
+ * other calls while a redirect or authorization challenge is being handled.
+ *
+ * <p>When the maximum concurrent streams limit is reduced, some allocations will be rescinded.
+ * Attempting to create new streams on these allocations will fail.
+ *
+ * <p>Note that an allocation may be released before its stream is completed. This is intended to
+ * make bookkeeping easier for the caller: releasing the allocation as soon as the terminal stream
+ * has been found. But only complete the stream once its data stream has been exhausted.
  */
 public final class Connection {
-  private final ConnectionPool pool;
+  final ConnectionPool pool;
   private final Route route;
 
+  private final List<StreamAllocationReference> allocations = new ArrayList<>();
+
   private Socket socket;
+  private BufferedSource source;
+  private BufferedSink sink;
   private Handshake handshake;
   private Protocol protocol;
-  private HttpConnection httpConnection;
   private FramedConnection framedConnection;
-  private long idleStartTimeNs;
-  private int recycleCount;
+  private int allocationLimit = 1;
+  private boolean noNewAllocations;
 
-  /**
-   * The object that owns this connection. Null if it is shared (for SPDY),
-   * belongs to a pool, or has been discarded. Guarded by {@code pool}, which
-   * clears the owner when an incoming connection is recycled.
-   */
-  private Object owner;
+  /** Nanotime that this connection most recently became idle. */
+  long idleAt = Long.MAX_VALUE;
 
   public Connection(ConnectionPool pool, Route route) {
     this.pool = pool;
     this.route = route;
-  }
-
-  Object getOwner() {
-    synchronized (pool) {
-      return owner;
-    }
-  }
-
-  void setOwner(Object owner) {
-    if (isFramed()) return; // Framed connections are shared.
-    synchronized (pool) {
-      if (this.owner != null) throw new IllegalStateException("Connection already has an owner!");
-      this.owner = owner;
-    }
-  }
-
-  /**
-   * Attempts to clears the owner of this connection. Returns true if the owner
-   * was cleared and the connection can be pooled or reused. This will return
-   * false if the connection cannot be pooled or reused, such as if it was
-   * closed with {@link #closeIfOwnedBy}.
-   */
-  boolean clearOwner() {
-    synchronized (pool) {
-      if (owner == null) {
-        // No owner? Don't reuse this connection.
-        return false;
-      }
-
-      owner = null;
-      return true;
-    }
-  }
-
-  /**
-   * Closes this connection if it is currently owned by {@code owner}. This also
-   * strips the ownership of the connection so it cannot be pooled or reused.
-   */
-  void closeIfOwnedBy(Object owner) throws IOException {
-    if (isFramed()) throw new IllegalStateException();
-    synchronized (pool) {
-      if (this.owner != owner) {
-        return; // Wrong owner. Perhaps a late disconnect?
-      }
-
-      this.owner = null; // Drop the owner so the connection won't be reused.
-    }
-
-    // Don't close() inside the synchronized block.
-    if (socket != null) {
-      socket.close();
-    }
   }
 
   void connect(int connectTimeout, int readTimeout, int writeTimeout,
@@ -172,10 +140,12 @@ public final class Connection {
         connectSocket(connectTimeout, readTimeout, writeTimeout, connectionSpecSelector);
       } catch (IOException e) {
         Util.closeQuietly(socket);
+        Util.closeQuietly(framedConnection);
         socket = null;
+        source = null;
+        sink = null;
         handshake = null;
         protocol = null;
-        httpConnection = null;
         framedConnection = null;
 
         if (routeException == null) {
@@ -199,17 +169,22 @@ public final class Connection {
 
     if (route.address.getSslSocketFactory() != null) {
       connectTls(readTimeout, writeTimeout, connectionSpecSelector);
+      source = Okio.buffer(Okio.source(socket));
+      sink = Okio.buffer(Okio.sink(socket));
     } else {
       protocol = Protocol.HTTP_1_1;
+      source = Okio.buffer(Okio.source(socket));
+      sink = Okio.buffer(Okio.sink(socket));
     }
 
     if (protocol == Protocol.SPDY_3 || protocol == Protocol.HTTP_2) {
       socket.setSoTimeout(0); // Framed connection timeouts are set per-stream.
-      framedConnection = new FramedConnection.Builder(route.address.uriHost, true, socket)
-          .protocol(protocol).build();
+      framedConnection = new FramedConnection.Builder(route.address.uriHost, true)
+          .socket(socket, source, sink)
+          .protocol(protocol)
+          .build();
       framedConnection.sendConnectionPreface();
-    } else {
-      httpConnection = new HttpConnection(pool, this, socket);
+      allocationLimit = 256; // TODO(jwilson): what should this be?!
     }
   }
 
@@ -281,16 +256,29 @@ public final class Connection {
    * retried if the proxy requires authorization.
    */
   private void createTunnel(int readTimeout, int writeTimeout) throws IOException {
+    StreamAllocation allocation = reserve("TLS tunnel");
+    BufferedSource tunnelSource = Okio.buffer(Okio.source(socket));
+    BufferedSink tunnelSink = Okio.buffer(Okio.sink(socket));
+
     // Make an SSL Tunnel on the first message pair of each SSL + proxy connection.
+    HttpConnection tunnelConnection = new HttpConnection(allocation, tunnelSource, tunnelSink);
+    if (allocation == null || !allocation.newStream(tunnelConnection)) {
+      throw new AssertionError(); // Failed to allocate a stream for the TLS tunnel!
+    }
+
     Request tunnelRequest = createTunnelRequest();
-    HttpConnection tunnelConnection = new HttpConnection(pool, this, socket);
     tunnelConnection.setTimeouts(readTimeout, writeTimeout);
     HttpUrl url = tunnelRequest.httpUrl();
     String requestLine = "CONNECT " + url.host() + ":" + url.port() + " HTTP/1.1";
+
     while (true) {
       tunnelConnection.writeRequest(tunnelRequest.headers(), requestLine);
       tunnelConnection.flush();
-      Response response = tunnelConnection.readResponse().request(tunnelRequest).build();
+
+      Response response = tunnelConnection.readResponse()
+          .request(tunnelRequest)
+          .build();
+
       // The response body from a CONNECT should be empty, but if it is not then we should consume
       // it before proceeding.
       long contentLength = OkHeaders.contentLength(response);
@@ -307,8 +295,8 @@ public final class Connection {
           // that happens, then we will have buffered bytes that are needed by the SSLSocket!
           // This check is imperfect: it doesn't tell us whether a handshake will succeed, just
           // that it will almost certainly fail because the proxy has sent unexpected data.
-          if (tunnelConnection.bufferSize() > 0) {
-            throw new IOException("TLS tunnel buffered too many bytes!");
+          if (allocation.stream != null) {
+            throw new IOException("TLS tunnel didn't release connection!");
           }
           return;
 
@@ -347,28 +335,130 @@ public final class Connection {
   }
 
   /**
-   * Connects this connection if it isn't already. This creates tunnels, shares
-   * the connection with the connection pool, and configures timeouts.
+   * Attempts to reserves an allocation on this connection for a call. Returns null if no
+   * allocation is available.
    */
-  void connectAndSetOwner(OkHttpClient client, Object owner) throws RouteException {
-    setOwner(owner);
+  public StreamAllocation reserve(String name) {
+    synchronized (pool) {
+      if (noNewAllocations || allocations.size() >= allocationLimit) return null;
 
-    if (!isConnected()) {
-      List<ConnectionSpec> connectionSpecs = route.address.getConnectionSpecs();
-      connect(client.getConnectTimeout(), client.getReadTimeout(), client.getWriteTimeout(),
-          connectionSpecs, client.getRetryOnConnectionFailure());
-      if (isFramed()) {
-        client.getConnectionPool().share(this);
-      }
-      client.routeDatabase().connected(getRoute());
+      StreamAllocation result = new StreamAllocation(this);
+      allocations.add(new StreamAllocationReference(result, name));
+      return result;
     }
-
-    setTimeouts(client.getReadTimeout(), client.getWriteTimeout());
   }
 
-  /** Returns true if {@link #connect} has been attempted on this connection. */
-  boolean isConnected() {
-    return protocol != null;
+  /**
+   * Release the reservation on {@code streamAllocation}. If a stream is currently active it may
+   * continue to use this connection until it is complete.
+   */
+  public void release(StreamAllocation streamAllocation) {
+    synchronized (pool) {
+      if (streamAllocation.released) throw new IllegalStateException("already released");
+
+      streamAllocation.released = true;
+      if (streamAllocation.stream == null) {
+        remove(streamAllocation);
+      }
+    }
+  }
+
+  void remove(StreamAllocation streamAllocation) {
+    for (int i = 0, size = allocations.size(); i < size; i++) {
+      StreamAllocationReference weakReference = allocations.get(i);
+      if (weakReference.get() == streamAllocation) {
+        allocations.remove(i);
+
+        if (allocations.isEmpty()) {
+          idleAt = System.nanoTime();
+          // TODO(jwilson): schedule a cleanup thread if allocationLimit == 0.
+        }
+
+        return;
+      }
+    }
+    throw new IllegalArgumentException("unexpected allocation: " + streamAllocation);
+  }
+
+  /** Test for a stale socket. */
+  public boolean isReadable() {
+    try {
+      int readTimeout = socket.getSoTimeout();
+      try {
+        socket.setSoTimeout(1);
+        if (source.exhausted()) {
+          return false; // Stream is exhausted; socket is closed.
+        }
+        return true;
+      } finally {
+        socket.setSoTimeout(readTimeout);
+      }
+    } catch (SocketTimeoutException ignored) {
+      return true; // Read timed out; socket is good.
+    } catch (IOException e) {
+      return false; // Couldn't read; socket is closed.
+    }
+  }
+
+  /**
+   * Prevents new streams from being created on this connection. This is similar to setting the
+   * allocation limit to 0, except that this call is permanent.
+   */
+  public void noNewStreams() {
+    synchronized (pool) {
+      noNewAllocations = true;
+      for (int i = 0; i < allocations.size(); i++) {
+        allocations.get(i).rescind();
+      }
+    }
+  }
+
+  /**
+   * Sets the maximum number of streams that this connection will carry. Existing streams will not
+   * be interrupted, but existing allocations may be prevented from creating new streams.
+   */
+  public void setAllocationLimit(int allocationLimit) {
+    synchronized (pool) {
+      if (allocationLimit < 0) throw new IllegalArgumentException();
+      this.allocationLimit = allocationLimit;
+      for (int i = allocationLimit; i < allocations.size(); i++) {
+        allocations.get(i).rescind();
+      }
+    }
+  }
+
+  /**
+   * Look through the allocations held by this connection and confirm that they're all still
+   * alive. If they aren't, we have a leaked allocation. In which case we prevent this connection
+   * from taking new allocations so that it may gracefully shut down.
+   */
+  public void pruneLeakedAllocations() {
+    synchronized (pool) {
+      for (Iterator<StreamAllocationReference> i = allocations.iterator(); i.hasNext(); ) {
+        StreamAllocationReference reference = i.next();
+        if (reference.get() == null) {
+          Internal.logger.warning("Call " + reference.name
+              + " leaked a connection. Did you forget to close a response body?");
+          noNewAllocations = true;
+          i.remove();
+          if (allocations.isEmpty()) {
+            idleAt = System.nanoTime();
+            // TODO(jwilson): schedule a cleanup thread if allocationLimit == 0.
+          }
+        }
+      }
+    }
+  }
+
+  boolean isMultiplexed() {
+    return framedConnection != null;
+  }
+
+  /** Returns the number of allocations currently held. */
+  int size() {
+    synchronized (pool) {
+      return allocations.size();
+    }
   }
 
   /** Returns the route used by this connection. */
@@ -384,66 +474,8 @@ public final class Connection {
     return socket;
   }
 
-  BufferedSource rawSource() {
-    if (httpConnection == null) throw new UnsupportedOperationException();
-    return httpConnection.rawSource();
-  }
-
-  BufferedSink rawSink() {
-    if (httpConnection == null) throw new UnsupportedOperationException();
-    return httpConnection.rawSink();
-  }
-
-  /** Returns true if this connection is alive. */
-  boolean isAlive() {
-    return !socket.isClosed() && !socket.isInputShutdown() && !socket.isOutputShutdown();
-  }
-
-  /**
-   * Returns true if we are confident that we can read data from this
-   * connection. This is more expensive and more accurate than {@link
-   * #isAlive()}; callers should check {@link #isAlive()} first.
-   */
-  boolean isReadable() {
-    if (httpConnection != null) return httpConnection.isReadable();
-    return true; // Framed connections, and connections before connect() are both optimistic.
-  }
-
-  void resetIdleStartTime() {
-    if (framedConnection != null) throw new IllegalStateException("framedConnection != null");
-    this.idleStartTimeNs = System.nanoTime();
-  }
-
-  /** Returns true if this connection is idle. */
-  boolean isIdle() {
-    return framedConnection == null || framedConnection.isIdle();
-  }
-
-  /**
-   * Returns the time in ns when this connection became idle. Undefined if
-   * this connection is not idle.
-   */
-  long getIdleStartTimeNs() {
-    return framedConnection == null ? idleStartTimeNs : framedConnection.getIdleStartTimeNs();
-  }
-
   public Handshake getHandshake() {
     return handshake;
-  }
-
-  /** Returns the transport appropriate for this connection. */
-  Transport newTransport(HttpEngine httpEngine) throws IOException {
-    return (framedConnection != null)
-        ? new FramedTransport(httpEngine, framedConnection)
-        : new HttpTransport(httpEngine, httpConnection);
-  }
-
-  /**
-   * Returns true if this is a SPDY connection. Such connections can be used
-   * in multiple HTTP requests simultaneously.
-   */
-  boolean isFramed() {
-    return framedConnection != null;
   }
 
   /**
@@ -455,44 +487,28 @@ public final class Connection {
     return protocol != null ? protocol : Protocol.HTTP_1_1;
   }
 
-  void setTimeouts(int readTimeoutMillis, int writeTimeoutMillis)
-      throws RouteException {
-    if (protocol == null) throw new IllegalStateException("not connected");
-
-    // Don't set timeouts on shared SPDY connections.
-    if (httpConnection != null) {
-      try {
-        socket.setSoTimeout(readTimeoutMillis);
-      } catch (IOException e) {
-        throw new RouteException(e);
-      }
-      httpConnection.setTimeouts(readTimeoutMillis, writeTimeoutMillis);
-    }
-  }
-
-  void incrementRecycleCount() {
-    recycleCount++;
-  }
-
-  /**
-   * Returns the number of times this connection has been returned to the
-   * connection pool.
-   */
-  int recycleCount() {
-    return recycleCount;
-  }
-
   @Override public String toString() {
-    return "Connection{"
-        + route.address.uriHost + ":" + route.address.uriPort
-        + ", proxy="
-        + route.proxy
-        + " hostAddress="
-        + route.inetSocketAddress.getAddress().getHostAddress()
-        + " cipherSuite="
-        + (handshake != null ? handshake.cipherSuite() : "none")
-        + " protocol="
-        + protocol
+    return "Connection{" + route.address.uriHost + ":" + route.address.uriPort + ","
+        + " proxy=" + route.proxy
+        + " hostAddress=" + route.inetSocketAddress.getAddress().getHostAddress()
+        + " cipherSuite=" + (handshake != null ? handshake.cipherSuite() : "none")
+        + " protocol=" + protocol
         + '}';
+  }
+
+  private static final class StreamAllocationReference extends WeakReference<StreamAllocation> {
+    private final String name;
+
+    public StreamAllocationReference(StreamAllocation streamAllocation, String name) {
+      super(streamAllocation);
+      this.name = name;
+    }
+
+    public void rescind() {
+      StreamAllocation streamAllocation = get();
+      if (streamAllocation != null) {
+        streamAllocation.rescinded = true;
+      }
+    }
   }
 }

@@ -372,7 +372,8 @@ public final class Http2ConnectionTest {
 
     // play it back
     FramedConnection connection = connectionBuilder(peer, HTTP_2)
-        .pushObserver(observer).build();
+        .pushObserver(observer)
+        .build();
     FramedStream client = connection.newStream(headerEntries("b", "banana"), false, true);
     assertEquals(-1, client.getSource().read(new Buffer(), 1));
 
@@ -443,7 +444,8 @@ public final class Http2ConnectionTest {
 
     String longString = repeat('a', Http2.INITIAL_MAX_FRAME_SIZE + 1);
     Socket socket = peer.openSocket();
-    FramedConnection connection = new FramedConnection.Builder(true, socket)
+    FramedConnection connection = new FramedConnection.Builder(true)
+        .socket(socket)
         .pushObserver(IGNORE)
         .protocol(HTTP_2.getProtocol())
         .build();
@@ -488,7 +490,8 @@ public final class Http2ConnectionTest {
 
   private FramedConnection.Builder connectionBuilder(MockSpdyPeer peer, Variant variant)
       throws IOException {
-    return new FramedConnection.Builder(true, peer.openSocket())
+    return new FramedConnection.Builder(true)
+        .socket(peer.openSocket())
         .pushObserver(IGNORE)
         .protocol(variant.getProtocol());
   }

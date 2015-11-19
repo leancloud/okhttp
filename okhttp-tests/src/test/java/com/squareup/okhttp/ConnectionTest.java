@@ -13,9 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.squareup.okhttp.internal.allocations;
+package com.squareup.okhttp;
 
-import com.squareup.okhttp.ConnectionPool;
 import org.junit.Test;
 
 import static junit.framework.TestCase.assertEquals;
@@ -28,10 +27,10 @@ public final class ConnectionTest {
   ConnectionPool connectionPool = new ConnectionPool(1, 1000L);
 
   @Test public void reserveCreateCompleteRelease() throws Exception {
-    Connection connection = new Connection(connectionPool);
+    Connection connection = new Connection(connectionPool, null);
     connection.setAllocationLimit(1);
 
-    Connection.StreamAllocation a = connection.reserve("a");
+    StreamAllocation a = connection.reserve("a");
     Connection.Stream a1 = a.newStream("a1");
     assertNotNull(a1);
     a.streamComplete(a1);
@@ -42,10 +41,10 @@ public final class ConnectionTest {
   }
 
   @Test public void reserveCreateReleaseComplete() throws Exception {
-    Connection connection = new Connection(connectionPool);
+    Connection connection = new Connection(connectionPool, null);
     connection.setAllocationLimit(1);
 
-    Connection.StreamAllocation a = connection.reserve("a");
+    StreamAllocation a = connection.reserve("a");
     Connection.Stream a1 = a.newStream("a1");
     assertNotNull(a1);
     connection.release(a);
@@ -56,10 +55,10 @@ public final class ConnectionTest {
   }
 
   @Test public void reuseAllocation() throws Exception {
-    Connection connection = new Connection(connectionPool);
+    Connection connection = new Connection(connectionPool, null);
     connection.setAllocationLimit(1);
 
-    Connection.StreamAllocation a = connection.reserve("a");
+    StreamAllocation a = connection.reserve("a");
     Connection.Stream a1 = a.newStream("a1");
     assertNotNull(a1);
     a.streamComplete(a1);
@@ -75,10 +74,10 @@ public final class ConnectionTest {
   }
 
   @Test public void cannotReuseAllocationAfterRelease() throws Exception {
-    Connection connection = new Connection(connectionPool);
+    Connection connection = new Connection(connectionPool, null);
     connection.setAllocationLimit(1);
 
-    Connection.StreamAllocation a = connection.reserve("a");
+    StreamAllocation a = connection.reserve("a");
     Connection.Stream a1 = a.newStream("a1");
     a.streamComplete(a1);
     connection.release(a);
@@ -91,10 +90,10 @@ public final class ConnectionTest {
   }
 
   @Test public void createReturnsNullAfterNoNewStreams() throws Exception {
-    Connection connection = new Connection(connectionPool);
+    Connection connection = new Connection(connectionPool, null);
     connection.setAllocationLimit(1);
 
-    Connection.StreamAllocation a = connection.reserve("a");
+    StreamAllocation a = connection.reserve("a");
     Connection.Stream a1 = a.newStream("a1");
     assertNotNull(a1);
     a.streamComplete(a1);
@@ -109,10 +108,10 @@ public final class ConnectionTest {
   }
 
   @Test public void reserveReturnsNullAfterNoNewStreams() throws Exception {
-    Connection connection = new Connection(connectionPool);
+    Connection connection = new Connection(connectionPool, null);
     connection.setAllocationLimit(1);
 
-    Connection.StreamAllocation a = connection.reserve("a");
+    StreamAllocation a = connection.reserve("a");
     Connection.Stream a1 = a.newStream("a1");
 
     connection.noNewStreams();
@@ -124,10 +123,10 @@ public final class ConnectionTest {
   }
 
   @Test public void closeScheduledAfterNoNewStreams() throws Exception {
-    Connection connection = new Connection(connectionPool);
+    Connection connection = new Connection(connectionPool, null);
     connection.setAllocationLimit(1);
 
-    Connection.StreamAllocation a = connection.reserve("c");
+    StreamAllocation a = connection.reserve("c");
     Connection.Stream a1 = a.newStream("a1");
     connection.noNewStreams();
     assertEquals(Long.MAX_VALUE, connection.idleAt);
@@ -140,11 +139,11 @@ public final class ConnectionTest {
   }
 
   @Test public void multipleAllocations() throws Exception {
-    Connection connection = new Connection(connectionPool);
+    Connection connection = new Connection(connectionPool, null);
     connection.setAllocationLimit(2);
 
-    Connection.StreamAllocation a = connection.reserve("a");
-    Connection.StreamAllocation b = connection.reserve("b");
+    StreamAllocation a = connection.reserve("a");
+    StreamAllocation b = connection.reserve("b");
     Connection.Stream a1 = a.newStream("a1");
     Connection.Stream b1 = b.newStream("b1");
     assertEquals(2, connection.size());
@@ -161,7 +160,7 @@ public final class ConnectionTest {
   }
 
   @Test public void lowerAndRaiseAllocationLimit() throws Exception {
-    Connection connection = new Connection(connectionPool);
+    Connection connection = new Connection(connectionPool, null);
     connection.setAllocationLimit(2);
 
     assertNotNull(connection.reserve("a"));
@@ -177,7 +176,7 @@ public final class ConnectionTest {
   }
 
   @Test public void leakedAllocation() throws Exception {
-    Connection connection = new Connection(connectionPool);
+    Connection connection = new Connection(connectionPool, null);
     connection.setAllocationLimit(1);
 
     reserveAndLeakAllocation(connection);
