@@ -15,6 +15,8 @@
  */
 package com.squareup.okhttp;
 
+import com.squareup.okhttp.internal.http.Transport;
+
 /** Links a stream to a connection. */
 // TODO(jwilson): move this to internal once dust has all settled.
 public final class StreamAllocation {
@@ -28,7 +30,7 @@ public final class StreamAllocation {
    * allocation has been released, because the application may continue to read the response body
    * long after redirects and authorization challenges have all been handled.
    */
-  Object stream;
+  Transport stream;
 
   /**
    * True if this allocation has been taken away by the connection. The current stream may
@@ -40,21 +42,25 @@ public final class StreamAllocation {
     this.connection = connection;
   }
 
+  public Connection connection() {
+    return connection;
+  }
+
   /** Returns true if a new stream is permitted or null if this allocation has been rescinded. */
-  public boolean newStream(Object stream) {
+  public Transport newStream() {
     synchronized (connection.pool) {
       if (this.stream != null || released) throw new IllegalStateException();
-      if (rescinded) return false;
-      this.stream = stream;
-      return true;
+      if (rescinded) return null;
+      this.stream = connection.newTransport(this);
+      return this.stream;
     }
   }
 
-  public void noNewStreams() {
+  public void forbidReuse() {
     connection.noNewStreams();
   }
 
-  public void streamComplete(Object stream) {
+  public void streamComplete(Transport stream) {
     synchronized (connection.pool) {
       if (stream == null || stream != this.stream) throw new IllegalArgumentException();
       this.stream = null;
@@ -64,7 +70,21 @@ public final class StreamAllocation {
     }
   }
 
+  public void release() {
+    connection.release(this);
+  }
+
   @Override public String toString() {
     return connection.toString();
+  }
+
+  /** Break the stream after a failure. */
+  public void close() {
+    // TODO(jwilson).
+  }
+
+  public void disconnect() {
+    forbidReuse();
+    // TODO(jwilson).
   }
 }

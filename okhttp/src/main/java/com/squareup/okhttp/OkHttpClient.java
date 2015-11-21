@@ -17,12 +17,8 @@ package com.squareup.okhttp;
 
 import com.squareup.okhttp.internal.Internal;
 import com.squareup.okhttp.internal.InternalCache;
-import com.squareup.okhttp.internal.RouteDatabase;
 import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.internal.http.AuthenticatorAdapter;
-import com.squareup.okhttp.internal.http.HttpEngine;
-import com.squareup.okhttp.internal.http.RouteException;
-import com.squareup.okhttp.internal.http.Transport;
 import com.squareup.okhttp.internal.tls.OkHostnameVerifier;
 import java.io.IOException;
 import java.net.CookieHandler;
@@ -40,8 +36,6 @@ import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
-import okio.BufferedSink;
-import okio.BufferedSource;
 
 /**
  * Configures and creates HTTP connections. Most applications can use a single
@@ -63,31 +57,6 @@ public class OkHttpClient implements Cloneable {
 
   static {
     Internal.instance = new Internal() {
-      @Override public Transport newTransport(
-          Connection connection, HttpEngine httpEngine) throws IOException {
-        return connection.newTransport(httpEngine);
-      }
-
-      @Override public boolean clearOwner(Connection connection) {
-        return connection.clearOwner();
-      }
-
-      @Override public void closeIfOwnedBy(Connection connection, Object owner) throws IOException {
-        connection.closeIfOwnedBy(owner);
-      }
-
-      @Override public int recycleCount(Connection connection) {
-        return connection.recycleCount();
-      }
-
-      @Override public void setOwner(Connection connection, HttpEngine httpEngine) {
-        connection.setOwner(httpEngine);
-      }
-
-      @Override public boolean isReadable(Connection pooled) {
-        return pooled.isReadable();
-      }
-
       @Override public void addLenient(Headers.Builder builder, String line) {
         builder.addLenient(line);
       }
@@ -104,19 +73,6 @@ public class OkHttpClient implements Cloneable {
         return client.internalCache();
       }
 
-      @Override public void recycle(ConnectionPool pool, Connection connection) {
-        pool.recycle(connection);
-      }
-
-      @Override public RouteDatabase routeDatabase(OkHttpClient client) {
-        return client.routeDatabase();
-      }
-
-      @Override public void connectAndSetOwner(OkHttpClient client, Connection connection,
-          HttpEngine owner) throws RouteException {
-        connection.connectAndSetOwner(client, owner);
-      }
-
       @Override
       public void callEnqueue(Call call, Callback responseCallback, boolean forWebSocket) {
         call.enqueue(responseCallback, forWebSocket);
@@ -128,18 +84,6 @@ public class OkHttpClient implements Cloneable {
 
       @Override public Connection callEngineGetConnection(Call call) {
         return call.engine.getConnection();
-      }
-
-      @Override public BufferedSource connectionRawSource(Connection connection) {
-        return connection.rawSource();
-      }
-
-      @Override public BufferedSink connectionRawSink(Connection connection) {
-        return connection.rawSink();
-      }
-
-      @Override public void connectionSetOwner(Connection connection, Object owner) {
-        connection.setOwner(owner);
       }
 
       @Override
@@ -157,7 +101,6 @@ public class OkHttpClient implements Cloneable {
   /** Lazily-initialized. */
   private static SSLSocketFactory defaultSslSocketFactory;
 
-  private final RouteDatabase routeDatabase;
   private Dispatcher dispatcher;
   private Proxy proxy;
   private List<Protocol> protocols;
@@ -186,12 +129,10 @@ public class OkHttpClient implements Cloneable {
   private int writeTimeout = 10_000;
 
   public OkHttpClient() {
-    routeDatabase = new RouteDatabase();
     dispatcher = new Dispatcher();
   }
 
   private OkHttpClient(OkHttpClient okHttpClient) {
-    this.routeDatabase = okHttpClient.routeDatabase;
     this.dispatcher = okHttpClient.dispatcher;
     this.proxy = okHttpClient.proxy;
     this.protocols = okHttpClient.protocols;
@@ -500,10 +441,6 @@ public class OkHttpClient implements Cloneable {
 
   public boolean getRetryOnConnectionFailure() {
     return retryOnConnectionFailure;
-  }
-
-  RouteDatabase routeDatabase() {
-    return routeDatabase;
   }
 
   /**

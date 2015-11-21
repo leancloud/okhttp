@@ -18,7 +18,6 @@ package com.squareup.okhttp;
 import com.squareup.okhttp.internal.NamedRunnable;
 import com.squareup.okhttp.internal.http.HttpEngine;
 import com.squareup.okhttp.internal.http.RequestException;
-import com.squareup.okhttp.internal.http.RouteException;
 import java.io.IOException;
 import java.net.ProtocolException;
 import java.util.logging.Level;
@@ -263,7 +262,7 @@ public class Call {
     }
 
     // Create the initial HTTP engine. Retries and redirects need new engine for each attempt.
-    engine = new HttpEngine(client, request, false, false, forWebSocket, null, null, null, null);
+    engine = new HttpEngine(client, request, false, false, forWebSocket, null, null, null);
 
     int followUpCount = 0;
     while (true) {
@@ -278,18 +277,9 @@ public class Call {
       } catch (RequestException e) {
         // The attempt to interpret the request failed. Give up.
         throw e.getCause();
-      } catch (RouteException e) {
-        // The attempt to connect via a route failed. The request will not have been sent.
-        HttpEngine retryEngine = engine.recover(e);
-        if (retryEngine != null) {
-          engine = retryEngine;
-          continue;
-        }
-        // Give up; recovery is not possible.
-        throw e.getLastConnectException();
       } catch (IOException e) {
         // An attempt to communicate with a server failed. The request may have been sent.
-        HttpEngine retryEngine = engine.recover(e, null);
+        HttpEngine retryEngine = null; // engine.recover(e, null);
         if (retryEngine != null) {
           engine = retryEngine;
           continue;
@@ -317,9 +307,9 @@ public class Call {
         engine.releaseConnection();
       }
 
-      Connection connection = engine.close();
+      StreamAllocation streamAllocation = engine.close();
       request = followUp;
-      engine = new HttpEngine(client, request, false, false, forWebSocket, connection, null, null,
+      engine = new HttpEngine(client, request, false, false, forWebSocket, streamAllocation, null,
           response);
     }
   }

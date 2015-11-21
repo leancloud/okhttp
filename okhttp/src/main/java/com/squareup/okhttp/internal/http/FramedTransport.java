@@ -16,11 +16,13 @@
 
 package com.squareup.okhttp.internal.http;
 
+import com.squareup.okhttp.Connection;
 import com.squareup.okhttp.Headers;
 import com.squareup.okhttp.Protocol;
 import com.squareup.okhttp.Request;
 import com.squareup.okhttp.Response;
 import com.squareup.okhttp.ResponseBody;
+import com.squareup.okhttp.StreamAllocation;
 import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.internal.framed.ErrorCode;
 import com.squareup.okhttp.internal.framed.FramedConnection;
@@ -66,13 +68,23 @@ public final class FramedTransport implements Transport {
       ByteString.encodeUtf8("encoding"),
       ByteString.encodeUtf8("upgrade"));
 
-  private final HttpEngine httpEngine;
+  private final StreamAllocation allocation;
   private final FramedConnection framedConnection;
+  private HttpEngine httpEngine;
   private FramedStream stream;
 
-  public FramedTransport(HttpEngine httpEngine, FramedConnection framedConnection) {
-    this.httpEngine = httpEngine;
+  public FramedTransport(StreamAllocation allocation, FramedConnection framedConnection) {
+    this.allocation = allocation;
     this.framedConnection = framedConnection;
+  }
+
+  @Override public StreamAllocation allocation() {
+    return allocation;
+  }
+
+  @Override public Transport setHttpEngine(HttpEngine httpEngine) {
+    this.httpEngine = httpEngine;
+    return this;
   }
 
   @Override public Sink createRequestBody(Request request, long contentLength) throws IOException {
@@ -206,15 +218,8 @@ public final class FramedTransport implements Transport {
     return new RealResponseBody(response.headers(), Okio.buffer(stream.getSource()));
   }
 
-  @Override public void releaseConnectionOnIdle() {
-  }
-
-  @Override public void disconnect(HttpEngine engine) throws IOException {
-    if (stream != null) stream.close(ErrorCode.CANCEL);
-  }
-
-  @Override public boolean canReuseConnection() {
-    return true; // TODO: framedConnection.isClosed() ?
+  @Override public void disconnect() {
+    if (stream != null) stream.closeLater(ErrorCode.CANCEL);
   }
 
   /** When true, this header should not be emitted or consumed. */

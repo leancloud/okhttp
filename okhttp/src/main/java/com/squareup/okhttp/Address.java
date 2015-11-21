@@ -144,6 +144,10 @@ public final class Address {
     return sslSocketFactory;
   }
 
+  public boolean isHttps() {
+    return sslSocketFactory != null;
+  }
+
   /** Returns the hostname verifier, or null if this is not an HTTPS address. */
   public HostnameVerifier getHostnameVerifier() {
     return hostnameVerifier;

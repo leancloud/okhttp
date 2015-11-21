@@ -21,9 +21,11 @@ import com.squareup.okhttp.internal.Platform;
 import com.squareup.okhttp.internal.Util;
 import com.squareup.okhttp.internal.Version;
 import com.squareup.okhttp.internal.framed.FramedConnection;
-import com.squareup.okhttp.internal.http.HttpConnection;
+import com.squareup.okhttp.internal.http.FramedTransport;
+import com.squareup.okhttp.internal.http.HttpTransport;
 import com.squareup.okhttp.internal.http.OkHeaders;
 import com.squareup.okhttp.internal.http.RouteException;
+import com.squareup.okhttp.internal.http.Transport;
 import com.squareup.okhttp.internal.tls.OkHostnameVerifier;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
@@ -126,8 +128,7 @@ public final class Connection {
     Proxy proxy = route.getProxy();
     Address address = route.getAddress();
 
-    if (route.address.getSslSocketFactory() == null
-        && !connectionSpecs.contains(ConnectionSpec.CLEARTEXT)) {
+    if (!route.address.isHttps() && !connectionSpecs.contains(ConnectionSpec.CLEARTEXT)) {
       throw new RouteException(new UnknownServiceException(
           "CLEARTEXT communication not supported: " + connectionSpecs));
     }
@@ -166,15 +167,18 @@ public final class Connection {
       ConnectionSpecSelector connectionSpecSelector) throws IOException {
     socket.setSoTimeout(readTimeout);
     Platform.get().connectSocket(socket, route.getSocketAddress(), connectTimeout);
+    source = Okio.buffer(Okio.source(socket));
+    sink = Okio.buffer(Okio.sink(socket));
 
-    if (route.address.getSslSocketFactory() != null) {
+    if (route.address.isHttps()) {
       connectTls(readTimeout, writeTimeout, connectionSpecSelector);
+      if (!source.buffer().exhausted() || !sink.buffer().exhausted()) {
+        throw new IOException("TLS tunnel left bytes behind!");
+      }
       source = Okio.buffer(Okio.source(socket));
       sink = Okio.buffer(Okio.sink(socket));
     } else {
       protocol = Protocol.HTTP_1_1;
-      source = Okio.buffer(Okio.source(socket));
-      sink = Okio.buffer(Okio.sink(socket));
     }
 
     if (protocol == Protocol.SPDY_3 || protocol == Protocol.HTTP_2) {
@@ -257,14 +261,11 @@ public final class Connection {
    */
   private void createTunnel(int readTimeout, int writeTimeout) throws IOException {
     StreamAllocation allocation = reserve("TLS tunnel");
-    BufferedSource tunnelSource = Okio.buffer(Okio.source(socket));
-    BufferedSink tunnelSink = Okio.buffer(Okio.sink(socket));
 
     // Make an SSL Tunnel on the first message pair of each SSL + proxy connection.
-    HttpConnection tunnelConnection = new HttpConnection(allocation, tunnelSource, tunnelSink);
-    if (allocation == null || !allocation.newStream(tunnelConnection)) {
-      throw new AssertionError(); // Failed to allocate a stream for the TLS tunnel!
-    }
+    if (allocation == null) throw new AssertionError(); // Failed to allocate a stream!
+    HttpTransport tunnelConnection = (HttpTransport) allocation.newStream();
+    if (tunnelConnection == null) throw new AssertionError(); // Connection was rescinded!
 
     Request tunnelRequest = createTunnelRequest();
     tunnelConnection.setTimeouts(readTimeout, writeTimeout);
@@ -273,9 +274,9 @@ public final class Connection {
 
     while (true) {
       tunnelConnection.writeRequest(tunnelRequest.headers(), requestLine);
-      tunnelConnection.flush();
+      tunnelConnection.finishRequest();
 
-      Response response = tunnelConnection.readResponse()
+      Response response = tunnelConnection.readResponseHeaders()
           .request(tunnelRequest)
           .build();
 
@@ -494,6 +495,32 @@ public final class Connection {
         + " cipherSuite=" + (handshake != null ? handshake.cipherSuite() : "none")
         + " protocol=" + protocol
         + '}';
+  }
+
+  public Transport newTransport(StreamAllocation streamAllocation) {
+    if (framedConnection != null) {
+      // TODO(jwilson): release streams.
+      return new FramedTransport(streamAllocation, framedConnection);
+    } else {
+      return new HttpTransport(streamAllocation, source, sink);
+    }
+  }
+
+  public void disconnect() {
+    // TODO(jwilson)
+    Util.closeQuietly(socket);
+  }
+
+  public void close() throws IOException {
+    socket.close();
+  }
+
+  public BufferedSource rawSource() {
+    return source;
+  }
+
+  public BufferedSink rawSink() {
+    return sink;
   }
 
   private static final class StreamAllocationReference extends WeakReference<StreamAllocation> {

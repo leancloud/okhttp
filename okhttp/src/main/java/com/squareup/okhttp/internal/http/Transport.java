@@ -19,6 +19,7 @@ package com.squareup.okhttp.internal.http;
 import com.squareup.okhttp.Request;
 import com.squareup.okhttp.Response;
 import com.squareup.okhttp.ResponseBody;
+import com.squareup.okhttp.StreamAllocation;
 import java.io.IOException;
 import okio.Sink;
 
@@ -29,6 +30,10 @@ public interface Transport {
    * the time it takes to establish a new connection.
    */
   int DISCARD_STREAM_TIMEOUT_MILLIS = 100;
+
+  StreamAllocation allocation();
+
+  Transport setHttpEngine(HttpEngine httpEngine);
 
   /** Returns an output stream where the request body can be streamed. */
   Sink createRequestBody(Request request, long contentLength) throws IOException;
@@ -51,17 +56,5 @@ public interface Transport {
   /** Returns a stream that reads the response body. */
   ResponseBody openResponseBody(Response response) throws IOException;
 
-  /**
-   * Configures the response body to pool or close the socket connection when
-   * the response body is closed.
-   */
-  void releaseConnectionOnIdle() throws IOException;
-
-  void disconnect(HttpEngine engine) throws IOException;
-
-  /**
-   * Returns true if the socket connection held by this transport can be reused
-   * for a follow-up exchange.
-   */
-  boolean canReuseConnection();
+  void disconnect();
 }

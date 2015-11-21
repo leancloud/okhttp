@@ -27,6 +27,7 @@ import com.squareup.okhttp.Request;
 import com.squareup.okhttp.RequestBody;
 import com.squareup.okhttp.Response;
 import com.squareup.okhttp.Route;
+import com.squareup.okhttp.StreamAllocation;
 import com.squareup.okhttp.internal.Internal;
 import com.squareup.okhttp.internal.Platform;
 import com.squareup.okhttp.internal.Util;
@@ -37,7 +38,6 @@ import com.squareup.okhttp.internal.http.HttpMethod;
 import com.squareup.okhttp.internal.http.OkHeaders;
 import com.squareup.okhttp.internal.http.RequestException;
 import com.squareup.okhttp.internal.http.RetryableSink;
-import com.squareup.okhttp.internal.http.RouteException;
 import com.squareup.okhttp.internal.http.StatusLine;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -327,8 +327,9 @@ public class HttpURLConnectionImpl extends HttpURLConnection {
     }
   }
 
-  private HttpEngine newHttpEngine(String method, Connection connection, RetryableSink requestBody,
-      Response priorResponse) throws MalformedURLException, UnknownHostException {
+  private HttpEngine newHttpEngine(String method, StreamAllocation streamAllocation,
+      RetryableSink requestBody, Response priorResponse)
+      throws MalformedURLException, UnknownHostException {
     // OkHttp's Call API requires a placeholder body; the real body will be streamed separately.
     RequestBody placeholderBody = HttpMethod.requiresRequestBody(method)
         ? EMPTY_REQUEST_BODY
@@ -372,7 +373,7 @@ public class HttpURLConnectionImpl extends HttpURLConnection {
       engineClient = client.clone().setCache(null);
     }
 
-    return new HttpEngine(engineClient, request, bufferRequestBody, true, false, connection, null,
+    return new HttpEngine(engineClient, request, bufferRequestBody, true, false, streamAllocation,
         requestBody, priorResponse);
   }
 
@@ -430,8 +431,8 @@ public class HttpURLConnectionImpl extends HttpURLConnection {
         httpEngine.releaseConnection();
       }
 
-      Connection connection = httpEngine.close();
-      httpEngine = newHttpEngine(followUp.method(), connection, (RetryableSink) requestBody,
+      StreamAllocation streamAllocation = httpEngine.close();
+      httpEngine = newHttpEngine(followUp.method(), streamAllocation, (RetryableSink) requestBody,
           response);
     }
   }
@@ -458,21 +459,9 @@ public class HttpURLConnectionImpl extends HttpURLConnection {
       IOException toThrow = e.getCause();
       httpEngineFailure = toThrow;
       throw toThrow;
-    } catch (RouteException e) {
-      // The attempt to connect via a route failed. The request will not have been sent.
-      HttpEngine retryEngine = httpEngine.recover(e);
-      if (retryEngine != null) {
-        httpEngine = retryEngine;
-        return false;
-      }
-
-      // Give up; recovery is not possible.
-      IOException toThrow = e.getLastConnectException();
-      httpEngineFailure = toThrow;
-      throw toThrow;
     } catch (IOException e) {
       // An attempt to communicate with a server failed. The request may have been sent.
-      HttpEngine retryEngine = httpEngine.recover(e);
+      HttpEngine retryEngine = null; // httpEngine.recover(e); // TODO(jwilson)
       if (retryEngine != null) {
         httpEngine = retryEngine;
         return false;

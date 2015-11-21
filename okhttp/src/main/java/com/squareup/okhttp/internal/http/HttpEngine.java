@@ -31,6 +31,7 @@ import com.squareup.okhttp.Request;
 import com.squareup.okhttp.Response;
 import com.squareup.okhttp.ResponseBody;
 import com.squareup.okhttp.Route;
+import com.squareup.okhttp.StreamAllocation;
 import com.squareup.okhttp.internal.Internal;
 import com.squareup.okhttp.internal.InternalCache;
 import com.squareup.okhttp.internal.Util;
@@ -40,14 +41,10 @@ import java.io.InterruptedIOException;
 import java.net.CookieHandler;
 import java.net.ProtocolException;
 import java.net.Proxy;
-import java.net.SocketTimeoutException;
-import java.security.cert.CertificateException;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import javax.net.ssl.HostnameVerifier;
-import javax.net.ssl.SSLHandshakeException;
-import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSocketFactory;
 import okio.Buffer;
 import okio.BufferedSink;
@@ -111,12 +108,11 @@ public final class HttpEngine {
 
   final OkHttpClient client;
 
-  private Connection connection;
-  private Address address;
-  private RouteSelector routeSelector;
-  private Route route;
+  /** Non-null if this engine currently holds an allocated stream. */
+  private StreamAllocation streamAllocation;
   private final Response priorResponse;
 
+  /** Initialized to a non-null value when connected to the network. Never nulled out afterwards. */
   private Transport transport;
 
   /** The time when the request headers were written, or -1 if they haven't been written yet. */
@@ -178,30 +174,21 @@ public final class HttpEngine {
    * @param callerWritesRequestBody true for the {@code HttpURLConnection}-style interaction
    *     model where control flow is returned to the calling application to write the request body
    *     before the response body is readable.
-   * @param connection the connection used for an intermediate response immediately prior to this
-   *     request/response pair, such as a same-host redirect. This engine assumes ownership of the
-   *     connection and must release it when it is unneeded.
-   * @param routeSelector the route selector used for a failed attempt immediately preceding this
+   * @param streamAllocation the stream allocation for an intermediate response immediately prior to
+ *     this request/response pair, such as a same-host redirect. This engine assumes ownership of
+ *     the allocation and must release it when it is unneeded.
    */
   public HttpEngine(OkHttpClient client, Request request, boolean bufferRequestBody,
-      boolean callerWritesRequestBody, boolean forWebSocket, Connection connection,
-      RouteSelector routeSelector, RetryableSink requestBodyOut, Response priorResponse) {
+      boolean callerWritesRequestBody, boolean forWebSocket, StreamAllocation streamAllocation,
+      RetryableSink requestBodyOut, Response priorResponse) {
     this.client = client;
     this.userRequest = request;
     this.bufferRequestBody = bufferRequestBody;
     this.callerWritesRequestBody = callerWritesRequestBody;
     this.forWebSocket = forWebSocket;
-    this.connection = connection;
-    this.routeSelector = routeSelector;
+    this.streamAllocation = streamAllocation;
     this.requestBodyOut = requestBodyOut;
     this.priorResponse = priorResponse;
-
-    if (connection != null) {
-      Internal.instance.setOwner(connection, this);
-      this.route = connection.getRoute();
-    } else {
-      this.route = null;
-    }
   }
 
   /**
@@ -210,13 +197,10 @@ public final class HttpEngine {
    * writing the request body if it exists.
    *
    * @throws RequestException if there was a problem with request setup. Unrecoverable.
-   * @throws RouteException if the was a problem during connection via a specific route. Sometimes
-   *     recoverable. See {@link #recover(RouteException)}.
    * @throws IOException if there was a problem while making a request. Sometimes recoverable. See
    *     {@link #recover(IOException)}.
-   *
    */
-  public void sendRequest() throws RequestException, RouteException, IOException {
+  public void sendRequest() throws RequestException, IOException {
     if (cacheStrategy != null) return; // Already sent.
     if (transport != null) throw new IllegalStateException();
 
@@ -242,11 +226,7 @@ public final class HttpEngine {
 
     if (networkRequest != null) {
       // Open a connection unless we inherited one from a redirect.
-      if (connection == null) {
-        connect();
-      }
-
-      transport = Internal.instance.newTransport(connection, this);
+      connect();
 
       // If the caller's control flow writes the request body, we need to create that stream
       // immediately. And that means we need to immediately write the request headers, so we can
@@ -278,9 +258,9 @@ public final class HttpEngine {
 
     } else {
       // We aren't using the network. Recycle a connection we may have inherited from a redirect.
-      if (connection != null) {
-        Internal.instance.recycle(client.getConnectionPool(), connection);
-        connection = null;
+      if (streamAllocation != null) {
+        streamAllocation.release();
+        streamAllocation = null;
       }
 
       if (cacheResponse != null) {
@@ -313,39 +293,25 @@ public final class HttpEngine {
   }
 
   /** Connect to the origin server either directly or via a proxy. */
-  private void connect() throws RequestException, RouteException {
-    if (connection != null) throw new IllegalStateException();
+  private void connect() throws RequestException, IOException {
+    if (transport != null) throw new IllegalStateException();
 
-    if (routeSelector == null) {
-      address = createAddress(client, networkRequest);
-      try {
-        routeSelector = RouteSelector.get(address, networkRequest, client);
-      } catch (IOException e) {
-        throw new RequestException(e);
+    while (transport == null) {
+      if (streamAllocation == null) {
+        Address address = createAddress(client, networkRequest);
+        ConnectionPool pool = client.getConnectionPool();
+        streamAllocation = pool.get(address, client.getConnectTimeout(), client.getReadTimeout(),
+            client.getWriteTimeout(), client.getRetryOnConnectionFailure());
       }
-    }
 
-    connection = createNextConnection();
-    Internal.instance.connectAndSetOwner(client, connection, this);
-    route = connection.getRoute();
-  }
-
-  private Connection createNextConnection() throws RouteException {
-    ConnectionPool pool = client.getConnectionPool();
-
-    // Always prefer pooled connections over new connections.
-    for (Connection pooled; (pooled = pool.get(address)) != null; ) {
-      if (networkRequest.method().equals("GET") || Internal.instance.isReadable(pooled)) {
-        return pooled;
+      transport = streamAllocation.newStream();
+      if (transport == null) {
+        streamAllocation.release();
+        streamAllocation = null;
+        continue;
       }
-      closeQuietly(pooled.getSocket());
-    }
 
-    try {
-      Route route = routeSelector.next();
-      return new Connection(pool, route);
-    } catch (IOException e) {
-      throw new RouteException(e);
+      transport.setHttpEngine(this);
     }
   }
 
@@ -393,111 +359,45 @@ public final class HttpEngine {
   }
 
   public Connection getConnection() {
-    return connection;
+    return transport != null ? transport.allocation().connection() : null;
   }
 
-  /**
-   * Attempt to recover from failure to connect via a route. Returns a new HTTP engine
-   * that should be used for the retry if there are other routes to try, or null if
-   * there are no more routes to try.
-   */
-  public HttpEngine recover(RouteException e) {
-    if (routeSelector != null && connection != null) {
-      connectFailed(routeSelector, e.getLastConnectException());
-    }
-
-    if (routeSelector == null && connection == null // No connection.
-        || routeSelector != null && !routeSelector.hasNext() // No more routes to attempt.
-        || !isRecoverable(e)) {
-      return null;
-    }
-
-    Connection connection = close();
-
-    // For failure recovery, use the same route selector with a new connection.
-    return new HttpEngine(client, userRequest, bufferRequestBody, callerWritesRequestBody,
-        forWebSocket, connection, routeSelector, (RetryableSink) requestBodyOut, priorResponse);
-  }
-
-  private boolean isRecoverable(RouteException e) {
-    // If the application has opted-out of recovery, don't recover.
-    if (!client.getRetryOnConnectionFailure()) {
-      return false;
-    }
-
-    // Problems with a route may mean the connection can be retried with a new route, or may
-    // indicate a client-side or server-side issue that should not be retried. To tell, we must look
-    // at the cause.
-
-    IOException ioe = e.getLastConnectException();
-
-    // If there was a protocol problem, don't recover.
-    if (ioe instanceof ProtocolException) {
-      return false;
-    }
-
-    // If there was an interruption don't recover, but if there was a timeout
-    // we should try the next route (if there is one).
-    if (ioe instanceof InterruptedIOException) {
-      return ioe instanceof SocketTimeoutException;
-    }
-
-    // Look for known client-side or negotiation errors that are unlikely to be fixed by trying
-    // again with a different route.
-    if (ioe instanceof SSLHandshakeException) {
-      // If the problem was a CertificateException from the X509TrustManager,
-      // do not retry.
-      if (ioe.getCause() instanceof CertificateException) {
-        return false;
-      }
-    }
-    if (ioe instanceof SSLPeerUnverifiedException) {
-      // e.g. a certificate pinning error.
-      return false;
-    }
-
-    // An example of one we might want to retry with a different route is a problem connecting to a
-    // proxy and would manifest as a standard IOException. Unless it is one we know we should not
-    // retry, we return true and try a new route.
-    return true;
-  }
-
-  /**
-   * Report and attempt to recover from a failure to communicate with a server. Returns a new
-   * HTTP engine that should be used for the retry if {@code e} is recoverable, or null if
-   * the failure is permanent. Requests with a body can only be recovered if the
-   * body is buffered.
-   */
-  public HttpEngine recover(IOException e, Sink requestBodyOut) {
-    if (routeSelector != null && connection != null) {
-      connectFailed(routeSelector, e);
-    }
-
-    boolean canRetryRequestBody = requestBodyOut == null || requestBodyOut instanceof RetryableSink;
-    if (routeSelector == null && connection == null // No connection.
-        || routeSelector != null && !routeSelector.hasNext() // No more routes to attempt.
-        || !isRecoverable(e)
-        || !canRetryRequestBody) {
-      return null;
-    }
-
-    Connection connection = close();
-
-    // For failure recovery, use the same route selector with a new connection.
-    return new HttpEngine(client, userRequest, bufferRequestBody, callerWritesRequestBody,
-        forWebSocket, connection, routeSelector, (RetryableSink) requestBodyOut, priorResponse);
-  }
-
-  private void connectFailed(RouteSelector routeSelector, IOException e) {
-    // If this is a recycled connection, don't count its failure against the route.
-    if (Internal.instance.recycleCount(connection) > 0) return;
-    Route failedRoute = connection.getRoute();
-    routeSelector.connectFailed(failedRoute, e);
-  }
-
-  public HttpEngine recover(IOException e) {
-    return recover(e, requestBodyOut);
-  }
+  ///**
+  // * Report and attempt to recover from a failure to communicate with a server. Returns a new
+  // * HTTP engine that should be used for the retry if {@code e} is recoverable, or null if
+  // * the failure is permanent. Requests with a body can only be recovered if the
+  // * body is buffered.
+  // */
+  //public HttpEngine recover(IOException e, Sink requestBodyOut) {
+  //  if (routeSelector != null && connection != null) {
+  //    connectFailed(routeSelector, e);
+  //  }
+  //
+  //  boolean canRetryRequestBody = requestBodyOut == null || requestBodyOut instanceof RetryableSink;
+  //  if (routeSelector == null && connection == null // No connection.
+  //      || routeSelector != null && !routeSelector.hasNext() // No more routes to attempt.
+  //      || !isRecoverable(e)
+  //      || !canRetryRequestBody) {
+  //    return null;
+  //  }
+  //
+  //  StreamAllocation streamAllocation = close();
+  //
+  //  // For failure recovery, use the same route selector with a new connection.
+  //  return new HttpEngine(client, userRequest, bufferRequestBody, callerWritesRequestBody,
+  //      forWebSocket, streamAllocation, (RetryableSink) requestBodyOut, priorResponse);
+  //}
+  //
+  //private void connectFailed(RouteSelector routeSelector, IOException e) {
+  //  // If this is a recycled connection, don't count its failure against the route.
+  //  if (Internal.instance.recycleCount(connection) > 0) return;
+  //  Route failedRoute = connection.getRoute();
+  //  routeSelector.connectFailed(failedRoute, e);
+  //}
+  //
+  //public HttpEngine recover(IOException e) {
+  //  return recover(e, requestBodyOut);
+  //}
 
   private boolean isRecoverable(IOException e) {
     // If the application has opted-out of recovery, don't recover.
@@ -523,7 +423,8 @@ public final class HttpEngine {
    * connected yet, or if no connection was necessary.
    */
   public Route getRoute() {
-    return route;
+    Connection connection = getConnection();
+    return connection != null ? connection.getRoute() : null;
   }
 
   private void maybeCache() throws IOException {
@@ -552,10 +453,10 @@ public final class HttpEngine {
    * be released immediately.
    */
   public void releaseConnection() throws IOException {
-    if (transport != null && connection != null) {
-      transport.releaseConnectionOnIdle();
+    if (streamAllocation != null) {
+      streamAllocation.release();
+      streamAllocation = null;
     }
-    connection = null;
   }
 
   /**
@@ -568,24 +469,18 @@ public final class HttpEngine {
    * Otherwise if a socket connection is being established, that is terminated.
    */
   public void disconnect() {
-    try {
-      if (transport != null) {
-        transport.disconnect(this);
-      } else {
-        Connection connection = this.connection;
-        if (connection != null) {
-          Internal.instance.closeIfOwnedBy(connection, this);
-        }
-      }
-    } catch (IOException ignored) {
+    // TODO(jwilson): this is racy.
+    if (streamAllocation != null) {
+      streamAllocation.disconnect();
+      streamAllocation = null;
     }
   }
 
   /**
-   * Release any resources held by this engine. If a connection is still held by
-   * this engine, it is returned.
+   * Release any resources held by this engine. If a stream is still held by this engine, it is
+   * returned.
    */
-  public Connection close() {
+  public StreamAllocation close() {
     if (bufferedRequestBody != null) {
       // This also closes the wrapped requestBodyOut.
       closeQuietly(bufferedRequestBody);
@@ -593,30 +488,21 @@ public final class HttpEngine {
       closeQuietly(requestBodyOut);
     }
 
-    // If this engine never achieved a response body, its connection cannot be reused.
+    // If this engine never achieved a response body, its stream allocation cannot be reused.
     if (userResponse == null) {
-      if (connection != null) closeQuietly(connection.getSocket()); // TODO: does this break SPDY?
-      connection = null;
+      if (streamAllocation != null) {
+        streamAllocation.forbidReuse();
+        streamAllocation = null;
+      }
       return null;
     }
 
-    // Close the response body. This will recycle the connection if it is eligible.
+    // Close the response body. This may make the stream reusable.
     closeQuietly(userResponse.body());
 
-    // Close the connection if it cannot be reused.
-    if (transport != null && connection != null && !transport.canReuseConnection()) {
-      closeQuietly(connection.getSocket());
-      connection = null;
-      return null;
-    }
-
-    // Prevent this engine from disconnecting a connection it no longer owns.
-    if (connection != null && !Internal.instance.clearOwner(connection)) {
-      connection = null;
-    }
-
-    Connection result = connection;
-    connection = null;
+    // Return the allocation to the caller.
+    StreamAllocation result = this.streamAllocation;
+    streamAllocation = null;
     return result;
   }
 
@@ -781,6 +667,13 @@ public final class HttpEngine {
       networkResponse = readNetworkResponse();
     }
 
+    // If the request specified that the connection shouldn't be reused, don't reuse it.
+    // If the response specified that the connection shouldn't be reused, don't reuse it.
+    if ("close".equalsIgnoreCase(networkRequest.header("Connection"))
+        || "close".equalsIgnoreCase(networkResponse.header("Connection"))) {
+      streamAllocation.forbidReuse();
+    }
+
     receiveHeaders(networkResponse.headers());
 
     // If we have a cache response too, then we're doing a conditional get.
@@ -832,7 +725,7 @@ public final class HttpEngine {
     }
 
     @Override public Connection connection() {
-      return connection;
+      return getConnection();
     }
 
     @Override public Request request() {
@@ -908,7 +801,7 @@ public final class HttpEngine {
 
     Response networkResponse = transport.readResponseHeaders()
         .request(networkRequest)
-        .handshake(connection.getHandshake())
+        .handshake(getConnection().getHandshake())
         .header(OkHeaders.SENT_MILLIS, Long.toString(sentRequestMillis))
         .header(OkHeaders.RECEIVED_MILLIS, Long.toString(System.currentTimeMillis()))
         .build();

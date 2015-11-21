@@ -148,21 +148,12 @@ public final class WebSocketCall {
           + "'");
     }
 
-    // TODO connection = call.engine.getConnection();
     Connection connection = Internal.instance.callEngineGetConnection(call);
-    // TODO if (!connection.clearOwner()) {
-    if (!Internal.instance.clearOwner(connection)) {
-      throw new IllegalStateException("Unable to take ownership of connection.");
-    }
-
-    BufferedSource source = Internal.instance.connectionRawSource(connection);
-    BufferedSink sink = Internal.instance.connectionRawSink(connection);
+    BufferedSource source = connection.rawSource();
+    BufferedSink sink = connection.rawSink();
 
     final RealWebSocket webSocket =
         ConnectionWebSocket.create(response, connection, source, sink, random, listener);
-
-    // TODO connection.setOwner(webSocket);
-    Internal.instance.connectionSetOwner(connection, webSocket);
 
     listener.onOpen(webSocket, response);
 
@@ -196,8 +187,7 @@ public final class WebSocketCall {
 
     @Override protected void close() throws IOException {
       replyExecutor.shutdown();
-      // TODO connection.closeIfOwnedBy(this);
-      Internal.instance.closeIfOwnedBy(connection, this);
+      connection.close();
     }
   }
 }
