@@ -4,9 +4,9 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>com.squareup.okhttp</groupId>
+    <groupId>cn.leancloud.android</groupId>
     <artifactId>parent</artifactId>
-    <version>2.6.0</version>
+    <version>2.6.0-leancloud-SNAPSHOT</version>
   </parent>
 
   <artifactId>okhttp</artifactId>
@@ -14,8 +14,9 @@
 
   <dependencies>
     <dependency>
-      <groupId>com.squareup.okio</groupId>
+      <groupId>cn.leancloud.android</groupId>
       <artifactId>okio</artifactId>
+      <version>1.6.0-leancloud-SNAPSHOT</version>
     </dependency>
     <dependency>
       <groupId>com.google.android</groupId>
@@ -27,22 +28,10 @@
   <build>
     <plugins>
       <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>templating-maven-plugin</artifactId>
-        <version>1.0-alpha-3</version>
-        <executions>
-          <execution>
-            <goals>
-              <goal>filter-sources</goal>
-            </goals>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-javadoc-plugin</artifactId>
         <configuration>
-          <excludePackageNames>com.squareup.okhttp.internal:com.squareup.okhttp.internal.*</excludePackageNames>
+          <excludePackageNames>com.avoscloud.okhttp.internal:com.avoscloud.okhttp.internal.*</excludePackageNames>
           <links>
             <link>http://square.github.io/okio/</link>
           </links>
