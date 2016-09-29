@@ -4,19 +4,19 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>cn.leancloud.android</groupId>
-    <artifactId>parent</artifactId>
-    <version>2.6.0-leancloud</version>
+    <groupId>cn.leancloud</groupId>
+    <artifactId>okhttp-parent</artifactId>
+    <version>2.6.0</version>
   </parent>
 
-  <artifactId>okhttp</artifactId>
+  <artifactId>okhttp-leancloud</artifactId>
   <name>OkHttp</name>
 
   <dependencies>
     <dependency>
-      <groupId>cn.leancloud.android</groupId>
-      <artifactId>okio</artifactId>
-      <version>1.6.0-leancloud</version>
+      <groupId>cn.leancloud</groupId>
+      <artifactId>okio-leancloud</artifactId>
+      <version>1.6.0</version>
     </dependency>
     <dependency>
       <groupId>com.google.android</groupId>

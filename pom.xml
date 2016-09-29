@@ -3,9 +3,9 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>cn.leancloud.android</groupId>
-  <artifactId>parent</artifactId>
-  <version>2.6.0-leancloud</version>
+  <groupId>cn.leancloud</groupId>
+  <artifactId>okhttp-parent</artifactId>
+  <version>2.6.0</version>
   <packaging>pom</packaging>
 
   <name>OkHttp (Parent)</name>
@@ -14,6 +14,7 @@
 
   <modules>
     <module>okhttp</module>
+<!--
     <module>okhttp-tests</module>
 
     <module>okhttp-android-support</module>
@@ -31,6 +32,7 @@
     <module>mockwebserver</module>
     <module>samples</module>
     <module>benchmarks</module>
+ -->
   </modules>
 
   <properties>
@@ -56,22 +58,47 @@
 
   <issueManagement>
     <system>GitHub Issues</system>
-    <url>https://github.com/square/okhttp/issues</url>
+    <url>https://github.com/leancloud/okhttp/issues</url>
   </issueManagement>
 
   <licenses>
     <license>
-      <name>Apache 2.0</name>
+      <name>The Apache License, Version 2.0</name>
       <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
     </license>
   </licenses>
 
+  <developers>
+    <developer>
+      <name>Ni Huajie</name>
+      <email>hni@leancloud.rocks</email>
+      <organization>LeanCloud</organization>
+      <organizationUrl>https://leancloud.cn</organizationUrl>
+    </developer>
+  </developers>
+
+  <scm>
+      <connection>scm:git:git://github.com/leancloud/android-stub.git</connection>
+      <developerConnection>scm:git:ssh://github.com:leancloud/android-stub.git</developerConnection>
+      <url>http://github.com/leancloud/android-stub/tree/master</url>
+  </scm>
+  <distributionManagement>
+    <snapshotRepository>
+      <id>ossrh</id>
+      <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+    </snapshotRepository>
+    <repository>
+      <id>ossrh</id>
+      <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+    </repository>
+  </distributionManagement>
+
   <dependencyManagement>
     <dependencies>
       <dependency>
-        <groupId>cn.leancloud.android</groupId>
-        <artifactId>okio</artifactId>
-        <version>1.6.0-leancloud</version>
+        <groupId>cn.leancloud</groupId>
+        <artifactId>okio-leancloud</artifactId>
+        <version>1.6.0</version>
       </dependency>
       <dependency>
         <groupId>junit</groupId>
@@ -161,38 +188,53 @@
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-release-plugin</artifactId>
-        <version>2.4.2</version>
-        <dependencies>
-          <dependency>
-            <groupId>org.apache.maven.scm</groupId>
-            <artifactId>maven-scm-provider-gitexe</artifactId>
-            <version>1.9</version>
-          </dependency>
-        </dependencies>
-        <configuration>
-          <autoVersionSubmodules>true</autoVersionSubmodules>
-        </configuration>
-      </plugin>
-
-      <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>animal-sniffer-maven-plugin</artifactId>
-        <version>1.11</version>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>2.10.4</version>
         <executions>
           <execution>
-            <phase>test</phase>
+            <id>attach-javadocs</id>
             <goals>
-              <goal>check</goal>
+              <goal>jar</goal>
             </goals>
           </execution>
         </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>2.2.1</version>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals>
+              <goal>jar-no-fork</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin> 
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-gpg-plugin</artifactId>
+        <version>1.5</version>
+        <executions>
+          <execution>
+            <id>sign-artifacts</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>sign</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.sonatype.plugins</groupId>
+        <artifactId>nexus-staging-maven-plugin</artifactId>
+        <version>1.6.7</version>
+        <extensions>true</extensions>
         <configuration>
-          <signature>
-            <groupId>org.codehaus.mojo.signature</groupId>
-            <artifactId>java16</artifactId>
-            <version>1.1</version>
-          </signature>
+          <serverId>ossrh</serverId>
+          <nexusUrl>https://oss.sonatype.org/</nexusUrl>
+          <autoReleaseAfterClose>true</autoReleaseAfterClose>
         </configuration>
       </plugin>
     </plugins>
@@ -259,15 +301,43 @@
     </profile>
   </profiles>
 
-    <distributionManagement>
-        <snapshotRepository>
-            <id>snapshots</id>
-            <url>http://mvn.leancloud.cn/nexus/content/repositories/snapshots/</url>
-        </snapshotRepository>
-        <repository>
-            <id>releases</id>
-            <url>http://mvn.leancloud.cn/nexus/content/repositories/releases/</url>
-        </repository>
-    </distributionManagement>
+  <reporting>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-project-info-reports-plugin</artifactId>
+        <version>2.7</version>
+        <configuration>
+          <dependencyLocationsEnabled>false</dependencyLocationsEnabled>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>cobertura-maven-plugin</artifactId>
+        <version>2.6</version>
+        <configuration>
+          <formats>
+            <format>html</format>
+            <format>xml</format>
+          </formats>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>2.15</version>
+        <configuration>
+          <!-- Sets the VM argument line used when unit tests are run. -->
+          <argLine>${surefireArgLine}</argLine>
+          <!-- Skips unit tests if the value of skip.unit.tests property is true -->
+          <skipTests>${skip.unit.tests}</skipTests>
+          <!-- Excludes integration tests when unit tests are run. -->
+          <excludes>
+            <exclude>**/NotTest*.java</exclude>
+          </excludes>
+        </configuration>
+      </plugin>
+    </plugins>
+  </reporting>
 
 </project>
